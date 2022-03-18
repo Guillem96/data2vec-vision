@@ -1,0 +1,257 @@
+import math
+from typing import Sequence, Tuple
+
+import torch
+import torchvision.transforms as T
+
+from data2vec_vision.data import MaskingFn, TransformFn
+
+
+class ViTPatchesTransform(torch.nn.Module):
+    """Takes a tensor image ([*, C, H, W]) and generates a set of patches.
+
+    This procedure follows the one described in the ViT paper.
+
+    Supports single image input tensor of shape [C, H, W] and batches images
+    input tensor of shape [N, C, H, W] where N is is the number of images in
+    a batch.
+
+    Parameters
+    ----------
+    patch_size: int
+        With and height of the patches. Patches should be a square.
+    patch_stride: int
+        Patches stride.
+    """
+
+    def __init__(self, patch_size: int = 16, patch_stride: int = 16) -> None:
+        super().__init__()
+        self.patch_size = patch_size
+        self.patch_stride = patch_stride
+
+    def forward(self, im: torch.Tensor) -> torch.Tensor:
+        """Extract patches from the given image as described in ViT paper.
+
+        Parameters
+        ----------
+        im: torch.Tensor
+            Source image of shape (*, C, H, W) where * can be the batch.
+
+        Returns
+        -------
+        torch.Tensor
+            Image patches [*, K, C, PATCH_SIZE, PATCH_SIZE] where K is the 
+            number of horizontal times the number of vertical patches.
+        """
+        if im.dim() == 4:
+            ix = (2, 3)
+        elif im.dim() == 3:
+            ix = (1, 2)
+        else:
+            raise ValueError("Invalid dimensions")
+
+        patches = im
+        for i in ix:
+            patches = patches.unfold(i, self.patch_size, self.patch_stride)
+
+        if im.dim() == 3:
+            c = im.size(0)
+            patches = patches.permute(1, 2, 0, 3, 4)
+            return patches.reshape(-1, c, self.patch_size, self.patch_size)
+
+        b, c, *_ = im.size()
+        patches = patches.permute(0, 2, 3, 1, 4, 5)
+        return patches.reshape(b, -1, c, self.patch_size, self.patch_size)
+
+
+class BEiTMaskingTransform(torch.nn.Module):
+    """Mask a percentage of adjacent patches.
+
+    The procedure is described in the BEiT paper.
+
+    This transformation supports single patched images [K, C, H, W] where K is
+    the total number of patches, H and W are the patch height and width 
+    respectively. Also support batches of patches, input tensor shape of
+    [N, K, C, H, W].
+
+    The transformation return the masked patches as well as the boolean mask
+    specifing which patches have been patched.
+
+    Parameters
+    ----------
+    p: float
+        Probability of masking the input patched images. Defaults 1.
+    patch_size: int
+        Height and width of the input patches. Defaults 16.
+    erase_pct: float
+        Percentage of the image to mask. Similar to RandomErasing torchvision 
+        `scale` parameter. Defaults 0.6.
+    """
+
+    def __init__(self, p: float = 1.0, erase_pct: float = 0.6) -> None:
+        super().__init__()
+        self.erase_pct = erase_pct
+        self.rnd_erase_tfm = T.RandomErasing(p=p,
+                                             scale=(erase_pct, erase_pct),
+                                             ratio=(0.3, 3.3))
+
+    def forward(self, im: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Masks adjacent patches.
+
+        Parameters
+        ----------
+        im : torch.Tensor
+            Input image patches of shape [K, C, H, W]. Works also for batched
+            patches of shape [N, K, C, H, W].
+
+        Returns
+        -------
+        Tuple[torch.Tensor, torch.Tensor]
+            Masked patches of shape [*, K, C, H, W] and the boolean mask of
+            shape [*, K].
+
+        Raises
+        ------
+        ValueError
+            In case the number of dimensions is different from 4 and 5.
+        """
+        input_dim = im.dim()
+        if input_dim == 4:
+            np, _, h, w = im.size()
+            bs = 1
+        elif input_dim == 5:
+            bs, np, _, h, w = im.size()
+        else:
+            raise ValueError(
+                "Unexpected dimension numbers {0}".format(input_dim))
+
+        hnp = wnp = int(math.sqrt(np))
+        masks = torch.ones(bs, 1, hnp, wnp, device=im.device)
+        masks = self.rnd_erase_tfm(masks)
+        exp_mask = masks.view(bs, 1, hnp, wnp, 1, 1)
+        exp_mask = exp_mask.permute(0, 2, 3, 1, 4, 5)
+        im = im.view(bs, hnp, wnp, 3, h, w) * exp_mask
+        im = im.view(bs, hnp * wnp, 3, h, w)
+
+        if input_dim == 4:
+            return im.squeeze(), 1 - masks.view(hnp * wnp)
+
+        return im, 1 - masks.view(bs, hnp * wnp)
+
+
+class PatchesToSequence(torch.nn.Module):
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, patches: torch.Tensor) -> torch.Tensor:
+        if patches.dim() == 5:
+            bs, k, *_ = patches.size()
+            return patches.view(bs, k, -1)
+        k = patches.size(0)
+        return patches.view(k, -1)
+
+
+class JoinPatchSequence(torch.nn.Module):
+    """Joins the patches generated by `ViTPatchesTransform` into images again.
+
+    Parameters
+    ----------
+    patches : int
+        Size of image patches.
+    """
+
+    def __init__(self, patch_size: int = 16) -> None:
+        super().__init__()
+        self.patch_size = patch_size
+
+    def forward(self, im: torch.Tensor) -> torch.Tensor:
+        w_batches = im.dim() == 5
+        n_patches_dim = 1 if w_batches else 0
+        n_patches = int(math.sqrt(im.size(n_patches_dim)))
+        if w_batches:
+            im = im.view(im.size(0), n_patches, n_patches, 3, self.patch_size,
+                         self.patch_size)
+        else:
+            im = im.view(n_patches, n_patches, 3, self.patch_size,
+                         self.patch_size)
+
+        output_c = im.size(w_batches + 2)
+        output_h = im.size(w_batches + 0) * im.size(w_batches + 3)
+        output_w = im.size(w_batches + 1) * im.size(w_batches + 4)
+        if w_batches:
+            im = im.permute(0, 3, 1, 4, 2, 5).contiguous()
+            return im.view(im.size(0), output_c, output_h, output_w)
+
+        im = im.permute(2, 0, 3, 1, 4).contiguous()
+        return im.view(output_c, output_h, output_w)
+
+
+class UnNormalize(torch.nn.Module):
+
+    def __init__(self, mean: Sequence[float], std: Sequence[float]) -> None:
+        super().__init__()
+        self.mean = mean
+        self.std = std
+
+    def forward(self, tensor: torch.Tensor) -> torch.Tensor:
+        """_summary_
+
+        Parameters
+        ----------
+        tensor : torch.Tensor
+            Float tensor image of size (C, H, W) or (B, C, H, W) to be 
+            normalized.
+
+        Returns
+        -------
+        torch.Tensor
+            Un normalized tensor.
+        """
+        mean_t = torch.as_tensor(self.mean,
+                                 dtype=tensor.dtype,
+                                 device=tensor.device)
+        mean_t = mean_t.view(3, 1, 1)
+
+        std_t = torch.as_tensor(self.std,
+                                dtype=tensor.dtype,
+                                device=tensor.device)
+        std_t = std_t.view(3, 1, 1)
+
+        if tensor.dim() == 4:
+            mean_t.unsqueeze_(0)
+            std_t.unsqueeze_(0)
+
+        return tensor.mul_(std_t).add_(mean_t)
+
+
+def build_train_tfms(
+        initial_im_size: Tuple[int, int] = (224, 224),
+        patch_size: int = 16,
+        do_crop: bool = True,
+        do_jitter: bool = True,
+        mask_erase_pct: float = .6) -> Tuple[TransformFn, MaskingFn]:
+
+    tfms = []
+    if do_crop:
+        before_crop_size = (int(initial_im_size[0] * 1.3),
+                            int(initial_im_size[1] * 1.3))
+        tfms.extend(
+            [T.Resize(before_crop_size),
+             T.RandomCrop(initial_im_size)])
+    else:
+        tfms.append(T.Resize(initial_im_size))
+
+    tfms.append(T.RandomApply([T.Resize((64, 64)), T.Resize(initial_im_size)]))
+
+    if do_jitter:
+        tfms.append(T.ColorJitter(brightness=.5, contrast=.3, saturation=.3))
+
+    tfms.extend([
+        T.ToTensor(),
+        T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ViTPatchesTransform(patch_size=patch_size, patch_stride=patch_size),
+    ])
+
+    masking_fn = BEiTMaskingTransform(erase_pct=mask_erase_pct)
+    return T.Compose(tfms), masking_fn
