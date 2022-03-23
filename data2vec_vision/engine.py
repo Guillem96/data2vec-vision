@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-Sample = Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]
+Sample = Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 
 def train_step(teacher_model: nn.Module,
@@ -119,7 +119,7 @@ def train_single_epoch(
     student_model.train()
     optimizer.zero_grad()
 
-    for i, (im, (masked_im, bool_mask)) in enumerate(dl, start=1):
+    for i, (im, masked_im, bool_mask) in enumerate(dl, start=1):
         im = im.to(device)
         masked_im = masked_im.to(device)
         bool_mask = bool_mask.to(device)
