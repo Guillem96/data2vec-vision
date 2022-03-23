@@ -1,7 +1,7 @@
 import random
 from os import PathLike
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Optional
 
 import click
 import torch
@@ -9,8 +9,6 @@ import torch
 from data2vec_vision import Data2Vec, Data2VecDataset
 from data2vec_vision.engine import tau_generator, train_single_epoch
 from data2vec_vision.transforms import PatchesToSequence, build_train_tfms
-from data2vec_vision.typing import Data2VecSample
-
 
 
 @click.command()
@@ -130,8 +128,7 @@ def train(
                                            batch_size,
                                            shuffle=True,
                                            pin_memory=True,
-                                           generator=g,
-                                           collate_fn=_collate_fn)
+                                           generator=g)
 
     steps_per_epoch = len(train_dl) // grad_accum
     student_model = Data2Vec(in_features=patch_size * patch_size * 3,
@@ -172,8 +169,8 @@ def train(
                                 increase_steps=tau_increase_steps)
         start_epoch = chkp["step"] // steps_per_epoch
     else:
-        tau_gen = tau_generator(min_value=0.1,
-                                max_value=0.99,
+        tau_gen = tau_generator(min_value=tau_initial,
+                                max_value=tau_end,
                                 increase_steps=tau_increase_steps)
         start_epoch = 0
 
@@ -201,10 +198,3 @@ def train(
             torch.save(chkp, checkpoint_out_dir / f"checkpoint_{epoch}.pt")
 
             student_model.save(checkpoint_out_dir / f"student_{epoch}.pt")
-
-
-def _collate_fn(records: List[Data2VecSample]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-  ims = torch.stack([o.image for o in records])
-  ims_masked = torch.stack([o.masked_image for o in records])
-  bool_masks = torch.stack([o.bool_mask for o in records])
-  return ims, ims_masked, bool_masks

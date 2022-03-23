@@ -4,8 +4,8 @@ Non official PyTorch implementation of the Self-supervision framework described 
 the [data2vec: A General Framework for Self-supervised Learning in Speech, Vision and Language
 ](https://arxiv.org/abs/2202.03555) paper.
 
-At the time writing this, the FAIR team has not yet published an [official implementation](www.github.com/pytorch/fairseq/
-tree/master/examples/data2vec)
+At the time writing this, the FAIR team has not yet published an 
+[official implementation](www.github.com/pytorch/fairseq/tree/master/examples/data2vec)
 of the data2vec framework for vision (hence not pre-trained weights).
 
 ![Data2Vec overview](img/data2vec-flow.png)
